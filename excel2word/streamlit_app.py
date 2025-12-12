@@ -317,7 +317,7 @@ def main():
     if 'download_clicked' not in st.session_state:
         st.session_state.download_clicked = False
     
-    st.title("📊 Excel转Word文档转换工具")
+    st.title("📊 Excel2Word")
     
     # 文件上传区域
     uploaded_files = st.file_uploader(
