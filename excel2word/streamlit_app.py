@@ -14,6 +14,7 @@ import io
 import zipfile
 import tempfile
 import os
+import time
 
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
@@ -313,6 +314,8 @@ def main():
         st.session_state.is_batch = False
     if 'prev_uploaded_files' not in st.session_state:
         st.session_state.prev_uploaded_files = None
+    if 'download_clicked' not in st.session_state:
+        st.session_state.download_clicked = False
     
     st.title("📊 Excel转Word文档转换工具")
     
@@ -332,11 +335,15 @@ def main():
         
         if current_files != prev_files:
             st.session_state.converted = False
+            st.session_state.download_clicked = False
             st.session_state.prev_uploaded_files = current_files
         
         # 显示文件信息（包含转换结果）
         if st.session_state.converted:
-            status_text = f"📁 已选择 **{file_count}** 个文件 | ✅ 转换成功：**{st.session_state.success_count}** | ❌ 转换失败：**{st.session_state.failed_count}**"
+            if st.session_state.failed_count == 0:
+                status_text = f"📁 已选择 **{file_count}** 个文件 | ✅ 转换成功：**{st.session_state.success_count}**"
+            else:
+                status_text = f"📁 已选择 **{file_count}** 个文件 | ✅ 转换成功：**{st.session_state.success_count}** | ❌ 转换失败：**{st.session_state.failed_count}**"
         else:
             status_text = f"📁 已选择 **{file_count}** 个文件"
         
@@ -345,39 +352,66 @@ def main():
         # 主按钮区域
         if not st.session_state.converted:
             # 显示转换按钮
-            if st.button("🚀 开始转换", type="primary", use_container_width=True):
-                # 重置之前的结果
-                st.session_state.success_count = 0
-                st.session_state.failed_count = 0
-                st.session_state.failed_files = []
-                
-                if file_count == 1:
-                    # 单文件处理
-                    st.session_state.is_batch = False
-                    with st.spinner("正在转换中..."):
-                        process_single_file_simple(uploaded_files[0])
-                else:
-                    # 多文件处理
-                    st.session_state.is_batch = True
-                    with st.spinner("正在批量转换中..."):
-                        process_multiple_files_simple(uploaded_files)
+            col1, col2, col3 = st.columns([1, 2, 1])
+            with col2:
+                if st.button("🚀 开始转换", type="primary", use_container_width=True):
+                    # 重置之前的结果
+                    st.session_state.success_count = 0
+                    st.session_state.failed_count = 0
+                    st.session_state.failed_files = []
+                    st.session_state.download_clicked = False
+                    
+                    if file_count == 1:
+                        # 单文件处理
+                        st.session_state.is_batch = False
+                        with st.spinner("正在转换中..."):
+                            process_single_file(uploaded_files[0])
+                    else:
+                        # 多文件处理
+                        st.session_state.is_batch = True
+                        with st.spinner("正在批量转换中..."):
+                            process_multiple_files(uploaded_files)
         
         else:
-            # 显示下载按钮（绿色）
-            download_label = f"📥 下载转换结果 ({st.session_state.download_filename})"
-            
-            # 根据是否有成功文件调整按钮颜色
-            button_type = "primary" if st.session_state.success_count > 0 else "secondary"
-            
-            if st.download_button(
-                label=download_label,
-                data=st.session_state.download_data,
-                file_name=st.session_state.download_filename,
-                mime="application/zip" if st.session_state.is_batch else "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                type=button_type,  # 有成功文件时绿色，没有时灰色
-                use_container_width=True
-            ):
-                st.success("✅ 开始下载...")
+            # 显示下载区域
+            col1, col2, col3 = st.columns([1, 2, 1])
+            with col2:
+                # 如果用户已经点击过下载，显示绿色对号按钮
+                if st.session_state.download_clicked:
+                    button_label = "✅ 下载完成"
+                    button_type = "primary"
+                    button_key = "download_complete"
+                    
+                    # 显示绿色对号按钮（禁用状态）
+                    st.button(button_label, 
+                            type=button_type, 
+                            disabled=True, 
+                            use_container_width=True,
+                            key=button_key)
+                    
+                else:
+                    # 正常下载按钮
+                    if st.session_state.is_batch:
+                        button_label = f"📥 下载转换结果"
+                    else:
+                        button_label = f"📥 下载转换结果"
+                    
+                    button_type = "primary"
+                    button_key = "download_file"
+                    
+                    # 使用download_button（蓝色按钮）
+                    if st.download_button(
+                        label=button_label,
+                        data=st.session_state.download_data,
+                        file_name=st.session_state.download_filename,
+                        mime="application/zip" if st.session_state.is_batch else "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        type=button_type,
+                        use_container_width=True,
+                        key=button_key
+                    ):
+                        # 设置下载已点击状态
+                        st.session_state.download_clicked = True
+                        st.rerun()
             
             # 显示失败文件列表（在下载按钮下面）
             if st.session_state.failed_files:
@@ -385,8 +419,8 @@ def main():
                     for file_name, error in st.session_state.failed_files:
                         st.error(f"**{file_name}**: {error}")
 
-def process_single_file_simple(uploaded_file):
-    """简化版单文件处理"""
+def process_single_file(uploaded_file):
+    """单文件处理"""
     try:
         # 创建临时文件进行转换
         with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as tmp_file:
@@ -414,8 +448,8 @@ def process_single_file_simple(uploaded_file):
         st.session_state.failed_files = [(uploaded_file.name, str(e))]
         st.session_state.converted = True
 
-def process_multiple_files_simple(uploaded_files):
-    """简化版多文件处理"""
+def process_multiple_files(uploaded_files):
+    """多文件处理"""
     # 创建临时文件夹
     with tempfile.TemporaryDirectory() as temp_dir:
         output_folder = os.path.join(temp_dir, "转换结果")
@@ -424,12 +458,14 @@ def process_multiple_files_simple(uploaded_files):
         success_count = 0
         failed_files = []
         
-        # 使用容器显示进度
-        progress_container = st.empty()
+        # 显示进度条
+        progress_bar = st.progress(0)
+        status_text = st.empty()
         
         for idx, uploaded_file in enumerate(uploaded_files):
             progress = (idx + 1) / len(uploaded_files)
-            progress_container.progress(progress)
+            progress_bar.progress(progress)
+            status_text.text(f"正在处理文件 {idx + 1}/{len(uploaded_files)}: {uploaded_file.name}")
             
             try:
                 # 生成输出文件名
@@ -448,7 +484,8 @@ def process_multiple_files_simple(uploaded_files):
                 failed_files.append((uploaded_file.name, str(e)))
         
         # 清理进度条
-        progress_container.empty()
+        progress_bar.empty()
+        status_text.empty()
         
         # 保存结果到会话状态
         if success_count > 0:
@@ -515,4 +552,3 @@ def sidebar_info():
 if __name__ == "__main__":
     sidebar_info()
     main()
-
