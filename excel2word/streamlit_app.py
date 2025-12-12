@@ -18,6 +18,79 @@ import time
 
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
+# ---------- CSS样式 ----------
+def inject_custom_css():
+    st.markdown("""
+    <style>
+    /* 按钮容器样式 */
+    .stButton > button {
+        position: relative;
+        overflow: hidden;
+        transition: all 0.3s ease;
+    }
+    
+    /* 进度条样式 - 在按钮内部 */
+    .progress-in-button {
+        position: absolute;
+        top: 0;
+        left: 0;
+        height: 100%;
+        background: linear-gradient(90deg, rgba(255,165,0,0.3), rgba(255,165,0,0.6));
+        transition: width 0.3s ease;
+        z-index: 1;
+    }
+    
+    /* 按钮文字样式 */
+    .button-text {
+        position: relative;
+        z-index: 2;
+        font-weight: bold;
+    }
+    
+    /* 转换中按钮样式 - 橙色 */
+    .converting-button {
+        background-color: #f97316 !important;
+        border-color: #f97316 !important;
+        color: white !important;
+    }
+    
+    .converting-button:hover {
+        background-color: #ea580c !important;
+        border-color: #ea580c !important;
+    }
+    
+    /* 下载按钮样式 - 蓝色 */
+    .download-button {
+        background-color: #3b82f6 !important;
+        border-color: #3b82f6 !important;
+        color: white !important;
+    }
+    
+    .download-button:hover {
+        background-color: #2563eb !important;
+        border-color: #2563eb !important;
+    }
+    
+    /* 下载完成按钮样式 - 绿色 */
+    .download-complete-button {
+        background-color: #10b981 !important;
+        border-color: #10b981 !important;
+        color: white !important;
+    }
+    
+    .download-complete-button:hover {
+        background-color: #059669 !important;
+        border-color: #059669 !important;
+    }
+    
+    /* 窄按钮容器 */
+    .narrow-button-container {
+        max-width: 300px;
+        margin: 0 auto;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
 # ---------- 边框/非空判断 ----------
 def has_top_border(row: Tuple[Cell, ...]) -> bool:
     return any(c.border.top and c.border.top.style for c in row)
@@ -289,6 +362,33 @@ def create_zip_bytes(folder_path):
     zip_buffer.seek(0)
     return zip_buffer
 
+# ---------- 自定义按钮组件 ----------
+def progress_button(label, progress=0, button_type="normal", key=None):
+    """创建带进度条的按钮"""
+    
+    button_classes = {
+        "normal": "",
+        "converting": "converting-button",
+        "download": "download-button",
+        "complete": "download-complete-button"
+    }
+    
+    button_class = button_classes.get(button_type, "")
+    
+    # 构建HTML
+    html = f"""
+    <div class="narrow-button-container">
+        <div class="stButton">
+            <button class="{button_class}" id="btn_{key}" style="width: 100%; height: 50px; position: relative;">
+                <div class="progress-in-button" style="width: {progress}%;"></div>
+                <span class="button-text">{label}</span>
+            </button>
+        </div>
+    </div>
+    """
+    
+    return st.markdown(html, unsafe_allow_html=True)
+
 # ---------- Streamlit 界面 ----------
 def main():
     st.set_page_config(
@@ -297,9 +397,16 @@ def main():
         layout="wide"
     )
     
+    # 注入CSS样式
+    inject_custom_css()
+    
     # 初始化会话状态
     if 'converted' not in st.session_state:
         st.session_state.converted = False
+    if 'converting' not in st.session_state:
+        st.session_state.converting = False
+    if 'progress' not in st.session_state:
+        st.session_state.progress = 0
     if 'download_data' not in st.session_state:
         st.session_state.download_data = None
     if 'download_filename' not in st.session_state:
@@ -335,6 +442,8 @@ def main():
         
         if current_files != prev_files:
             st.session_state.converted = False
+            st.session_state.converting = False
+            st.session_state.progress = 0
             st.session_state.download_clicked = False
             st.session_state.prev_uploaded_files = current_files
         
@@ -349,55 +458,56 @@ def main():
         
         st.info(status_text)
         
-        # 主按钮区域
-        if not st.session_state.converted:
-            # 显示转换按钮
-            col1, col2, col3 = st.columns([1, 2, 1])
-            with col2:
-                if st.button("🚀 开始转换", type="primary", use_container_width=True):
-                    # 重置之前的结果
-                    st.session_state.success_count = 0
-                    st.session_state.failed_count = 0
-                    st.session_state.failed_files = []
-                    st.session_state.download_clicked = False
-                    
-                    if file_count == 1:
-                        # 单文件处理
-                        st.session_state.is_batch = False
-                        with st.spinner("正在转换中..."):
-                            process_single_file(uploaded_files[0])
-                    else:
-                        # 多文件处理
-                        st.session_state.is_batch = True
-                        with st.spinner("正在批量转换中..."):
-                            process_multiple_files(uploaded_files)
+        # 主按钮区域 - 居中显示
+        col1, col2, col3 = st.columns([1, 2, 1])
         
-        else:
-            # 显示下载区域
-            col1, col2, col3 = st.columns([1, 2, 1])
-            with col2:
-                # 如果用户已经点击过下载，显示绿色对号按钮
-                if st.session_state.download_clicked:
-                    button_label = "✅ 下载完成"
-                    button_type = "primary"
-                    button_key = "download_complete"
-                    
-                    # 显示绿色对号按钮（禁用状态）
-                    st.button(button_label, 
-                            type=button_type, 
-                            disabled=True, 
-                            use_container_width=True,
-                            key=button_key)
-                    
+        with col2:
+            # 创建按钮容器
+            button_container = st.empty()
+            
+            if not st.session_state.converted:
+                # 显示转换按钮
+                if st.session_state.converting:
+                    # 转换中按钮（带进度条）
+                    progress_button("🔄 转换中...", 
+                                  st.session_state.progress, 
+                                  "converting", 
+                                  "converting_btn")
                 else:
-                    # 正常下载按钮
+                    # 开始转换按钮
+                    if st.button("🚀 开始转换", 
+                                type="primary", 
+                                use_container_width=True,
+                                key="start_convert_btn"):
+                        # 重置之前的结果
+                        st.session_state.success_count = 0
+                        st.session_state.failed_count = 0
+                        st.session_state.failed_files = []
+                        st.session_state.download_clicked = False
+                        st.session_state.converting = True
+                        st.session_state.progress = 0
+                        
+                        # 开始转换
+                        if file_count == 1:
+                            # 单文件处理
+                            st.session_state.is_batch = False
+                            process_single_file_with_progress(uploaded_files[0], button_container)
+                        else:
+                            # 多文件处理
+                            st.session_state.is_batch = True
+                            process_multiple_files_with_progress(uploaded_files, button_container)
+            
+            else:
+                # 显示下载区域
+                if st.session_state.download_clicked:
+                    # 下载完成按钮（绿色）
+                    progress_button("✅ 下载完成", 100, "complete", "download_complete_btn")
+                else:
+                    # 下载按钮
                     if st.session_state.is_batch:
-                        button_label = f"📥 下载转换结果"
+                        button_label = "📥 下载转换结果"
                     else:
-                        button_label = f"📥 下载转换结果"
-                    
-                    button_type = "primary"
-                    button_key = "download_file"
+                        button_label = "📥 下载转换结果"
                     
                     # 使用download_button（蓝色按钮）
                     if st.download_button(
@@ -405,25 +515,52 @@ def main():
                         data=st.session_state.download_data,
                         file_name=st.session_state.download_filename,
                         mime="application/zip" if st.session_state.is_batch else "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                        type=button_type,
+                        type="primary",
                         use_container_width=True,
-                        key=button_key
+                        key="download_file_btn"
                     ):
                         # 设置下载已点击状态
                         st.session_state.download_clicked = True
                         st.rerun()
             
-            # 显示失败文件列表（在下载按钮下面）
+            # 显示失败文件列表（在按钮下面）
             if st.session_state.failed_files:
                 with st.expander(f"📛 转换失败的文件 ({st.session_state.failed_count}个)", expanded=False):
                     for file_name, error in st.session_state.failed_files:
                         st.error(f"**{file_name}**: {error}")
 
-def process_single_file(uploaded_file):
-    """单文件处理"""
+def process_single_file_with_progress(uploaded_file, button_container):
+    """单文件处理（带进度条）"""
     try:
+        # 模拟进度更新
+        st.session_state.progress = 25
+        button_container.markdown(f"""
+        <div class="narrow-button-container">
+            <div class="stButton">
+                <button class="converting-button" style="width: 100%; height: 50px; position: relative;">
+                    <div class="progress-in-button" style="width: {st.session_state.progress}%;"></div>
+                    <span class="button-text">🔄 转换中... 25%</span>
+                </button>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        time.sleep(0.5)  # 模拟处理时间
+        
         # 创建临时文件进行转换
         with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as tmp_file:
+            st.session_state.progress = 75
+            button_container.markdown(f"""
+            <div class="narrow-button-container">
+                <div class="stButton">
+                    <button class="converting-button" style="width: 100%; height: 50px; position: relative;">
+                        <div class="progress-in-button" style="width: {st.session_state.progress}%;"></div>
+                        <span class="button-text">🔄 转换中... 75%</span>
+                    </button>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
             success, error = excel_to_word(uploaded_file, tmp_file.name)
             
             if success:
@@ -442,14 +579,19 @@ def process_single_file(uploaded_file):
             
             # 清理临时文件
             os.unlink(tmp_file.name)
-            
+        
+        # 完成进度
+        st.session_state.progress = 100
+        st.session_state.converting = False
+        
     except Exception as e:
         st.session_state.failed_count = 1
         st.session_state.failed_files = [(uploaded_file.name, str(e))]
         st.session_state.converted = True
+        st.session_state.converting = False
 
-def process_multiple_files(uploaded_files):
-    """多文件处理"""
+def process_multiple_files_with_progress(uploaded_files, button_container):
+    """多文件处理（带进度条）"""
     # 创建临时文件夹
     with tempfile.TemporaryDirectory() as temp_dir:
         output_folder = os.path.join(temp_dir, "转换结果")
@@ -458,14 +600,22 @@ def process_multiple_files(uploaded_files):
         success_count = 0
         failed_files = []
         
-        # 显示进度条
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
+        # 处理每个文件
         for idx, uploaded_file in enumerate(uploaded_files):
-            progress = (idx + 1) / len(uploaded_files)
-            progress_bar.progress(progress)
-            status_text.text(f"正在处理文件 {idx + 1}/{len(uploaded_files)}: {uploaded_file.name}")
+            progress = int(((idx + 1) / len(uploaded_files)) * 100)
+            st.session_state.progress = progress
+            
+            # 更新按钮进度
+            button_container.markdown(f"""
+            <div class="narrow-button-container">
+                <div class="stButton">
+                    <button class="converting-button" style="width: 100%; height: 50px; position: relative;">
+                        <div class="progress-in-button" style="width: {progress}%;"></div>
+                        <span class="button-text">🔄 转换中... {idx+1}/{len(uploaded_files)}</span>
+                    </button>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
             
             try:
                 # 生成输出文件名
@@ -482,10 +632,6 @@ def process_multiple_files(uploaded_files):
                     
             except Exception as e:
                 failed_files.append((uploaded_file.name, str(e)))
-        
-        # 清理进度条
-        progress_bar.empty()
-        status_text.empty()
         
         # 保存结果到会话状态
         if success_count > 0:
@@ -516,6 +662,10 @@ def process_multiple_files(uploaded_files):
             
             st.session_state.download_data = zip_buffer.getvalue()
             st.session_state.converted = True
+        
+        # 完成进度
+        st.session_state.progress = 100
+        st.session_state.converting = False
 
 # ---------- 侧边栏 ----------
 def sidebar_info():
