@@ -308,23 +308,12 @@ def main():
     )
     
     st.title("📊 Excel转Word文档转换工具")
-    st.markdown("""
-    **智能处理模式**：系统自动识别文件数量
-    - **单文件** → 直接下载Word文档
-    - **多文件** → 打包为ZIP文件夹下载
-    
-    **转换功能**：
-    - 自动识别表格区域和边框
-    - 保留合并单元格和格式
-    - 智能处理日期和数字格式
-    """)
     
     # 文件上传区域
     uploaded_files = st.file_uploader(
         "选择Excel文件（支持多选）",
         type=['xlsx', 'xls'],
         accept_multiple_files=True,
-        help="可以一次选择一个或多个文件"
     )
     
     if uploaded_files:
@@ -332,12 +321,7 @@ def main():
         
         # 显示文件信息
         st.info(f"📁 已选择 **{file_count}** 个文件")
-        
-        with st.expander("📋 文件列表", expanded=False):
-            for i, file in enumerate(uploaded_files, 1):
-                file_size_kb = file.size / 1024
-                st.write(f"{i}. **{file.name}** ({file_size_kb:.1f} KB)")
-        
+       
         # 转换按钮
         if st.button("🚀 开始转换", type="primary", use_container_width=True):
             with st.spinner("正在处理中，请稍候..."):
@@ -420,14 +404,6 @@ def process_multiple_files(uploaded_files):
         progress_bar.progress(1.0)
         status_text.text(f"✅ 处理完成！成功：{success_count}，失败：{len(failed_files)}")
         
-        # 显示结果统计
-        col1, col2 = st.columns(2)
-        with col1:
-            st.success(f"✅ 成功转换：**{success_count}** 个文件")
-        with col2:
-            if failed_files:
-                st.error(f"❌ 失败：**{len(failed_files)}** 个文件")
-        
         # 显示失败文件详情
         if failed_files:
             with st.expander("📛 转换失败的文件详情", expanded=False):
@@ -445,13 +421,7 @@ def process_multiple_files(uploaded_files):
             
             # 创建下载链接
             create_zip_download_link(output_folder, zip_name)
-            
-            # 显示成功文件列表
-            with st.expander("✅ 成功转换的文件列表", expanded=False):
-                for file in uploaded_files:
-                    if not any(file.name == failed[0] for failed in failed_files):
-                        doc_name = file.name.replace('.xlsx', '.docx').replace('.xls', '.docx')
-                        st.write(f"📄 {doc_name}")
+
         else:
             st.warning("⚠️ 没有文件转换成功，请检查上传的文件格式是否正确。")
 
@@ -465,11 +435,8 @@ def sidebar_info():
         2. **查看确认**：系统显示选择的文件列表
         3. **开始转换**：点击"开始转换"按钮
         4. **下载结果**：
-           - 单文件：直接下载Word文档
-           - 多文件：打包为ZIP下载
         
         ### 转换规则：
-        - **表格识别**：有上边框或≥2个非空单元格
         - **格式保留**：合并单元格、数字格式、日期格式
         - **样式设置**：宋体 + Times New Roman字体
         """)
@@ -499,3 +466,4 @@ def sidebar_info():
 if __name__ == "__main__":
     sidebar_info()
     main()
+
