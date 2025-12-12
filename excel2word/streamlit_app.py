@@ -19,8 +19,6 @@ import os
 
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
-DATE_FMT = '%Y年%m月%d日'
-
 # ---------- 边框/非空判断 ----------
 def has_top_border(row: Tuple[Cell, ...]) -> bool:
     return any(c.border.top and c.border.top.style for c in row)
@@ -82,7 +80,7 @@ def fmt_value(cell: Cell) -> str:
     if cell.data_type == 's':
         return cell.value or ""
     if cell.is_date:
-        return cell.value.strftime(DATE_FMT)
+        return cell.value.strftime('%Y年%m月%d日')
     if cell.data_type == 'n' and cell.value is not None:
         nf = cell.number_format or ''
         if '%' in nf:
@@ -268,15 +266,38 @@ def excel_to_word(excel_file, doc_stream):
                 continue
 
             txt = ' '.join(fmt_value(c) for c in ws[row_idx]).strip()
-            if txt:  # 只添加非空段落
-                p = doc.add_paragraph(txt)
-                set_para_format(p)
+            p = doc.add_paragraph(txt)
+            set_para_format(p)
             row_idx += 1
 
         doc.save(doc_stream)
         return True, None
     except Exception as e:
         return False, str(e)
+
+# ---------- 创建文件夹下载链接 ----------
+def create_zip_download_link(folder_path, zip_name):
+    """创建ZIP文件夹下载链接"""
+    zip_buffer = io.BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        for root, dirs, files in os.walk(folder_path):
+            for file in files:
+                file_path = os.path.join(root, file)
+                # 在ZIP中创建相对路径
+                rel_path = os.path.relpath(file_path, folder_path)
+                zip_file.write(file_path, rel_path)
+    
+    zip_buffer.seek(0)
+    
+    # 创建下载按钮
+    st.download_button(
+        label=f"📦 下载转换后的文件夹 ({zip_name}.zip)",
+        data=zip_buffer,
+        file_name=f"{zip_name}.zip",
+        mime="application/zip",
+        use_container_width=True
+    )
 
 # ---------- Streamlit 界面 ----------
 def main():
@@ -288,162 +309,192 @@ def main():
     
     st.title("📊 Excel转Word文档转换工具")
     st.markdown("""
-    将Excel文件转换为Word文档，自动识别表格区域并保留格式。
-    - **支持功能**：识别表格边框、合并单元格、保持数据格式
-    - **支持格式**：.xlsx、.xls
-    - **输出格式**：.docx
+    **智能处理模式**：系统自动识别文件数量
+    - **单文件** → 直接下载Word文档
+    - **多文件** → 打包为ZIP文件夹下载
+    
+    **转换功能**：
+    - 自动识别表格区域和边框
+    - 保留合并单元格和格式
+    - 智能处理日期和数字格式
     """)
     
     # 文件上传区域
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        uploaded_files = st.file_uploader(
-            "选择Excel文件",
-            type=['xlsx', 'xls'],
-            accept_multiple_files=True,
-            help="可以一次选择多个文件"
-        )
-    
-    with col2:
-        st.markdown("### 📋 转换设置")
-        process_mode = st.radio(
-            "处理模式",
-            ["单文件逐个处理", "多文件批量打包"]
-        )
+    uploaded_files = st.file_uploader(
+        "选择Excel文件（支持多选）",
+        type=['xlsx', 'xls'],
+        accept_multiple_files=True,
+        help="可以一次选择一个或多个文件"
+    )
     
     if uploaded_files:
-        st.success(f"已选择 {len(uploaded_files)} 个文件")
+        file_count = len(uploaded_files)
         
-        # 显示文件列表
-        with st.expander("📁 已选择的文件", expanded=True):
+        # 显示文件信息
+        st.info(f"📁 已选择 **{file_count}** 个文件")
+        
+        with st.expander("📋 文件列表", expanded=False):
             for i, file in enumerate(uploaded_files, 1):
-                st.write(f"{i}. {file.name} ({file.size:,} bytes)")
+                file_size_kb = file.size / 1024
+                st.write(f"{i}. **{file.name}** ({file_size_kb:.1f} KB)")
         
         # 转换按钮
         if st.button("🚀 开始转换", type="primary", use_container_width=True):
-            if process_mode == "单文件逐个处理":
-                convert_single_files(uploaded_files)
-            else:
-                convert_batch_files(uploaded_files)
+            with st.spinner("正在处理中，请稍候..."):
+                if file_count == 1:
+                    # 单文件处理
+                    process_single_file(uploaded_files[0])
+                else:
+                    # 多文件处理
+                    process_multiple_files(uploaded_files)
 
-def convert_single_files(uploaded_files):
-    """单文件逐个处理"""
+def process_single_file(uploaded_file):
+    """处理单个文件"""
+    st.write(f"**正在处理单个文件：** {uploaded_file.name}")
+    
+    try:
+        # 创建临时文件进行转换
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as tmp_file:
+            success, error = excel_to_word(uploaded_file, tmp_file.name)
+            
+            if success:
+                with open(tmp_file.name, 'rb') as f:
+                    doc_bytes = f.read()
+                
+                # 提供下载
+                doc_filename = uploaded_file.name.replace('.xlsx', '.docx').replace('.xls', '.docx')
+                st.download_button(
+                    label=f"📥 下载 {doc_filename}",
+                    data=doc_bytes,
+                    file_name=doc_filename,
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    use_container_width=True
+                )
+                st.success(f"✅ **{uploaded_file.name}** 转换完成！")
+            else:
+                st.error(f"❌ 转换失败: {error}")
+            
+            # 清理临时文件
+            os.unlink(tmp_file.name)
+            
+    except Exception as e:
+        st.error(f"❌ 处理文件时出错: {str(e)}")
+
+def process_multiple_files(uploaded_files):
+    """处理多个文件"""
+    st.write(f"**正在批量处理 {len(uploaded_files)} 个文件...**")
+    
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    for idx, uploaded_file in enumerate(uploaded_files):
-        progress = (idx) / len(uploaded_files)
-        progress_bar.progress(progress)
-        status_text.text(f"正在处理: {uploaded_file.name} ({idx+1}/{len(uploaded_files)})")
+    # 创建临时文件夹
+    with tempfile.TemporaryDirectory() as temp_dir:
+        output_folder = os.path.join(temp_dir, "转换结果")
+        os.makedirs(output_folder)
         
-        try:
-            # 创建临时文件进行转换
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as tmp_file:
-                success, error = excel_to_word(uploaded_file, tmp_file.name)
+        success_count = 0
+        failed_files = []
+        
+        for idx, uploaded_file in enumerate(uploaded_files):
+            progress = idx / len(uploaded_files)
+            progress_bar.progress(progress)
+            status_text.text(f"正在处理: {uploaded_file.name} ({idx+1}/{len(uploaded_files)})")
+            
+            try:
+                # 生成输出文件名
+                doc_filename = uploaded_file.name.replace('.xlsx', '.docx').replace('.xls', '.docx')
+                output_path = os.path.join(output_folder, doc_filename)
+                
+                # 转换文件
+                success, error = excel_to_word(uploaded_file, output_path)
                 
                 if success:
-                    with open(tmp_file.name, 'rb') as f:
-                        doc_bytes = f.read()
-                    
-                    # 提供下载
-                    st.download_button(
-                        label=f"📥 下载 {uploaded_file.name.replace('.xlsx', '.docx').replace('.xls', '.docx')}",
-                        data=doc_bytes,
-                        file_name=uploaded_file.name.replace('.xlsx', '.docx').replace('.xls', '.docx'),
-                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                        key=f"download_{idx}"
-                    )
-                    st.success(f"✓ {uploaded_file.name} 转换完成")
+                    success_count += 1
                 else:
-                    st.error(f"✗ {uploaded_file.name} 转换失败: {error}")
-                
-                # 清理临时文件
-                os.unlink(tmp_file.name)
-                
-        except Exception as e:
-            st.error(f"处理 {uploaded_file.name} 时出错: {str(e)}")
-    
-    progress_bar.progress(1.0)
-    status_text.text("✅ 所有文件处理完成！")
-
-def convert_batch_files(uploaded_files):
-    """多文件批量打包"""
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    with tempfile.TemporaryDirectory() as temp_dir:
-        zip_buffer = io.BytesIO()
-        
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            for idx, uploaded_file in enumerate(uploaded_files):
-                progress = idx / len(uploaded_files)
-                progress_bar.progress(progress)
-                status_text.text(f"正在处理: {uploaded_file.name} ({idx+1}/{len(uploaded_files)})")
-                
-                try:
-                    # 创建临时Word文件
-                    doc_filename = uploaded_file.name.replace('.xlsx', '.docx').replace('.xls', '.docx')
-                    doc_path = os.path.join(temp_dir, doc_filename)
+                    failed_files.append((uploaded_file.name, error))
                     
-                    success, error = excel_to_word(uploaded_file, doc_path)
-                    
-                    if success:
-                        # 添加到ZIP
-                        zip_file.write(doc_path, doc_filename)
-                        st.success(f"✓ {uploaded_file.name} 转换完成")
-                    else:
-                        st.error(f"✗ {uploaded_file.name} 转换失败: {error}")
-                        
-                except Exception as e:
-                    st.error(f"处理 {uploaded_file.name} 时出错: {str(e)}")
+            except Exception as e:
+                failed_files.append((uploaded_file.name, str(e)))
         
+        # 完成进度
         progress_bar.progress(1.0)
-        status_text.text("✅ 所有文件处理完成，正在生成打包文件...")
+        status_text.text(f"✅ 处理完成！成功：{success_count}，失败：{len(failed_files)}")
         
-        # 提供打包下载
-        zip_buffer.seek(0)
-        current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # 显示结果统计
+        col1, col2 = st.columns(2)
+        with col1:
+            st.success(f"✅ 成功转换：**{success_count}** 个文件")
+        with col2:
+            if failed_files:
+                st.error(f"❌ 失败：**{len(failed_files)}** 个文件")
         
-        st.download_button(
-            label="📦 下载所有转换文件（ZIP格式）",
-            data=zip_buffer,
-            file_name=f"excel_to_word_converted_{current_time}.zip",
-            mime="application/zip",
-            use_container_width=True
-        )
+        # 显示失败文件详情
+        if failed_files:
+            with st.expander("📛 转换失败的文件详情", expanded=False):
+                for file_name, error in failed_files:
+                    st.error(f"**{file_name}**: {error}")
         
-        st.success(f"已成功转换 {len(uploaded_files)} 个文件")
+        # 如果至少有一个文件转换成功，提供下载
+        if success_count > 0:
+            st.divider()
+            st.subheader("📦 下载转换结果")
+            
+            # 生成时间戳用于文件名
+            current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+            zip_name = f"Excel转Word_{current_time}"
+            
+            # 创建下载链接
+            create_zip_download_link(output_folder, zip_name)
+            
+            # 显示成功文件列表
+            with st.expander("✅ 成功转换的文件列表", expanded=False):
+                for file in uploaded_files:
+                    if not any(file.name == failed[0] for failed in failed_files):
+                        doc_name = file.name.replace('.xlsx', '.docx').replace('.xls', '.docx')
+                        st.write(f"📄 {doc_name}")
+        else:
+            st.warning("⚠️ 没有文件转换成功，请检查上传的文件格式是否正确。")
 
 # ---------- 侧边栏 ----------
 def sidebar_info():
     with st.sidebar:
         st.markdown("## ℹ️ 使用说明")
         st.markdown("""
-        1. **选择Excel文件**：点击上传按钮或拖拽文件到上传区域
-        2. **选择处理模式**：
-           - 单文件：逐个下载转换后的Word文档
-           - 多文件：所有文件打包为ZIP下载
-        3. **点击转换按钮**开始处理
+        ### 操作步骤：
+        1. **选择文件**：点击上传或拖拽Excel文件
+        2. **查看确认**：系统显示选择的文件列表
+        3. **开始转换**：点击"开始转换"按钮
+        4. **下载结果**：
+           - 单文件：直接下载Word文档
+           - 多文件：打包为ZIP下载
         
-        ### 📌 注意事项
-        - 仅处理第一个工作表
-        - 自动识别表格边框
-        - 保留合并单元格
-        - 支持日期、数字格式转换
+        ### 转换规则：
+        - **表格识别**：有上边框或≥2个非空单元格
+        - **格式保留**：合并单元格、数字格式、日期格式
+        - **样式设置**：宋体 + Times New Roman字体
         """)
         
         st.markdown("---")
-        st.markdown("### 🛠️ 技术支持")
+        
+        st.markdown("### 📊 支持格式")
         st.markdown("""
-        - 边框识别规则：有上边框或至少2个非空单元格
-        - 表格样式：首尾粗边框，中间虚线
-        - 字体：宋体 + Times New Roman
+        **输入**：
+        - Microsoft Excel (.xlsx)
+        - Excel 97-2003 (.xls)
+        
+        **输出**：
+        - Microsoft Word (.docx)
         """)
         
         st.markdown("---")
-        st.markdown("**版本**: 1.0.0")
-        st.markdown("**更新日期**: 2024年1月")
+        
+        st.markdown("### ⚠️ 注意事项")
+        st.markdown("""
+        1. 仅处理第一个工作表
+        2. 大文件转换可能需要较长时间
+        3. 确保Excel文件没有损坏
+        4. 建议单个文件不超过10MB
+        """)
 
 if __name__ == "__main__":
     sidebar_info()
