@@ -294,7 +294,7 @@ def main():
     st.set_page_config(
         page_title="Excel转Word工具",
         page_icon="📊",
-        layout="wide"
+        layout="centered"
     )
     
     # 初始化会话状态
@@ -552,3 +552,4 @@ def sidebar_info():
 if __name__ == "__main__":
     sidebar_info()
     main()
+
