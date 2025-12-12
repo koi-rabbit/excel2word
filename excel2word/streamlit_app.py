@@ -311,6 +311,8 @@ def main():
         st.session_state.failed_files = []
     if 'is_batch' not in st.session_state:
         st.session_state.is_batch = False
+    if 'prev_uploaded_files' not in st.session_state:
+        st.session_state.prev_uploaded_files = None
     
     st.title("📊 Excel转Word文档转换工具")
     
@@ -324,10 +326,13 @@ def main():
     if uploaded_files:
         file_count = len(uploaded_files)
         
-        # 如果上传了新文件或重置了状态，清除转换结果
-        if st.session_state.converted:
-            if not all(f.name in [uf.name for uf in uploaded_files] for f in st.session_state.uploaded_files if hasattr(st.session_state, 'uploaded_files')):
-                st.session_state.converted = False
+        # 如果上传了新文件，重置转换状态
+        current_files = [f.name for f in uploaded_files]
+        prev_files = st.session_state.prev_uploaded_files or []
+        
+        if current_files != prev_files:
+            st.session_state.converted = False
+            st.session_state.prev_uploaded_files = current_files
         
         # 显示文件信息（包含转换结果）
         if st.session_state.converted:
@@ -359,12 +364,17 @@ def main():
         
         else:
             # 显示下载按钮（绿色）
+            download_label = f"📥 下载转换结果 ({st.session_state.download_filename})"
+            
+            # 根据是否有成功文件调整按钮颜色
+            button_type = "primary" if st.session_state.success_count > 0 else "secondary"
+            
             if st.download_button(
-                label=f"📥 下载转换结果 ({st.session_state.download_filename})",
+                label=download_label,
                 data=st.session_state.download_data,
                 file_name=st.session_state.download_filename,
                 mime="application/zip" if st.session_state.is_batch else "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                type="primary",  # 这是绿色按钮
+                type=button_type,  # 有成功文件时绿色，没有时灰色
                 use_container_width=True
             ):
                 st.success("✅ 开始下载...")
@@ -458,7 +468,16 @@ def process_multiple_files_simple(uploaded_files):
             st.session_state.failed_count = len(failed_files)
             st.session_state.failed_files = failed_files
             st.session_state.download_filename = f"Excel转Word_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
-            st.session_state.download_data = b""  # 空的ZIP文件
+            
+            # 创建一个空的ZIP文件
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                # 创建一个空文件说明
+                info_file_content = "所有文件转换失败，请查看失败详情。".encode()
+                zip_file.writestr("转换说明.txt", info_file_content)
+            zip_buffer.seek(0)
+            
+            st.session_state.download_data = zip_buffer.getvalue()
             st.session_state.converted = True
 
 # ---------- 侧边栏 ----------
@@ -466,10 +485,11 @@ def sidebar_info():
     with st.sidebar:
         st.markdown("## ℹ️ 使用说明")
         st.markdown("""
-        ### 操作步骤：
-        1. **选择文件**：点击上传或拖拽Excel文件
-        2. **点击转换**：点击"开始转换"按钮
-        3. **下载结果**：转换完成后自动变成下载按钮
+        ### 简洁操作流程：
+        1. **上传文件** → 选择Excel文件
+        2. **点击转换** → 系统自动处理
+        3. **下载结果** → 同一个按钮变为绿色下载
+        
         """)
         
         st.markdown("---")
@@ -482,7 +502,6 @@ def sidebar_info():
         
         **输出**：
         - Microsoft Word (.docx)
-        - 批量文件打包为ZIP
         """)
         
         st.markdown("---")
@@ -490,12 +509,9 @@ def sidebar_info():
         st.markdown("### ⚠️ 注意事项")
         st.markdown("""
         1. 仅处理第一个工作表
-        2. 大文件可能需要较长时间
+        2. 大文件请耐心等待
         """)
 
 if __name__ == "__main__":
     sidebar_info()
     main()
-
-
-
