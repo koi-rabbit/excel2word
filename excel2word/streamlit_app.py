@@ -1,60 +1,192 @@
 import streamlit as st
 from pathlib import Path
 import openpyxl
+from openpyxl.cell.cell import Cell, MergedCell
 from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 from docx.oxml import OxmlElement
 from docx.oxml.shared import qn
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 from docx.shared import Pt
 from typing import List, Tuple
-import re
-from datetime import datetime, timedelta
+import warnings
+import datetime
 import io
 import base64
+import zipfile
+from datetime import datetime
+import tempfile
+import os
 
-DATE_FMT = '%Y-%m-%d'
+warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
-# ---------------- 下面全部是你原来的函数，原封不动 ----------------
-def is_table_row(row):
-    if is_empty_row(row):
-        return False
-    return sum(1 for c in row if c is not None) >= 2
+DATE_FMT = '%Y年%m月%d日'
 
-def is_empty_row(row):
+# ---------- 边框/非空判断 ----------
+def has_top_border(row: Tuple[Cell, ...]) -> bool:
+    return any(c.border.top and c.border.top.style for c in row)
+
+def non_empty_cnt(row: Tuple[Cell, ...]) -> int:
+    return sum(1 for c in row if c.value is not None)
+
+# ---------- 表格区域检测 ----------
+def find_tbls(ws) -> List[Tuple[int, int]]:
     """
-    整行全是 None 或空格，视为空行
+    返回 [(start_row, end_row), ...] 1-based
+    规则：
+        1. 有上边框 → 必为表格行（非空单元格数不限）。
+        2. 无上边框 → 只有非空≥2 才当表格行。
+        3. 表格结束：遇到既无上边框、又非空<2 的行。
     """
-    return all(str(v or '').strip() == '' for v in row)
+    tbls, in_tbl, start = [], False, None
+    for idx, row in enumerate(ws.iter_rows(), 1):
+        top_border = has_top_border(row)
+        cnt = non_empty_cnt(row)
 
-def set_table_borders(tbl, thick=12, dash=6):   #封装函数
-    rows = tbl.rows                             #rows:取行
+        if not in_tbl:                    # 当前不在表内
+            if top_border or cnt >= 2:    # 有边框 或 无框但非空≥2
+                in_tbl, start = True, idx
+        else:                             # 已在表内
+            if not top_border and cnt < 2:  # 既无框又空 → 表结束
+                tbls.append((start, idx - 1))
+                in_tbl = False
+    if in_tbl:
+        tbls.append((start, ws.max_row))
+    return tbls
+
+# ---------- 计算有效列数 ----------
+def effective_cols(ws, start_row: int, end_row: int) -> int:
+    """返回当前表格区域里，最右一个非空单元格所在的列号（1-based）"""
+    max_col = 0
+    for r in range(start_row, end_row + 1):
+        row = list(ws.iter_rows(min_row=r, max_row=r))[0]
+        for c in range(len(row), 0, -1):          # 从右往左找
+            if row[c - 1].value is not None:
+                max_col = max(max_col, c)
+                break
+    return max_col or 1   # 至少留 1 列
+
+# ---------- Excel 单元格 → 字符串 ----------
+def fmt_value(cell: Cell) -> str:
+    """兼容 MergedCell 的取值/格式化"""
+    # 0. 空值
+    if cell.value is None:
+        return ""
+
+    # 1. 合并单元格只能拿到 value
+    if isinstance(cell, MergedCell):
+        v = cell.value
+    else:
+        v = cell.value   # 普通单元格
+
+    # 2. 普通单元格精细处理
+    if cell.data_type == 's':
+        return cell.value or ""
+    if cell.is_date:
+        return cell.value.strftime(DATE_FMT)
+    if cell.data_type == 'n' and cell.value is not None:
+        nf = cell.number_format or ''
+        if '%' in nf:
+            return f"{cell.value:.2%}"
+        if ',' in nf or '#,#' in nf:
+            return f"{cell.value:,.2f}"
+        return f"{cell.value:.2f}"
+    return str(cell.value) if cell.value is not None else ""
+
+# ---------- 收集 Excel 合并单元格信息 ----------
+def collect_merges(ws, tbl_start: int, tbl_end: int):
+    """
+    返回 [(topRow, leftCol, height, width), ...]  1-based
+    只收集落在当前表格区域内的合并
+    """
+    rngs = []
+    for m in ws.merged_cells.ranges:
+        # m.min_row/max_row/min_col/max_col 都是 1-based
+        if m.min_row < tbl_start or m.max_row > tbl_end:
+            continue
+        rngs.append((m.min_row, m.min_col,
+                     m.max_row - m.min_row + 1,
+                     m.max_col - m.min_col + 1))
+    return rngs
+
+# ---------- 段落样式 ----------
+def set_para_format(p):
+    # 段落设置
+    pf = p.paragraph_format
+    pf.space_before = Pt(6)
+    pf.space_after = Pt(6)
+    pf.line_spacing_rule = WD_LINE_SPACING.EXACTLY
+    pf.line_spacing = Pt(18)
+    pf.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+    # 字体字号设置
+    run = p.runs[0] if p.runs else p.add_run()
+    run.font.size = Pt(10.5)
+    rPr = run._element.get_or_add_rPr()
+    rFonts = rPr.get_or_add_rFonts()
+    rFonts.set(qn('w:ascii'), 'Times New Roman')
+    rFonts.set(qn('w:hAnsi'), 'Times New Roman')
+    rFonts.set(qn('w:eastAsia'), '宋体')
+
+# ---------- Word 表格样式 ----------
+def set_cell_format(cell, text, cell_value):
+    cell.text = text
+    
+    # 垂直居中
+    tc_pr = cell._tc.get_or_add_tcPr()
+    tcVAlign = OxmlElement('w:vAlign')
+    tcVAlign.set(qn('w:val'), 'center')
+    tc_pr.append(tcVAlign)
+
+    # 表格段落设置
+    p = cell.paragraphs[0]
+    p_format = p.paragraph_format
+    p_format.space_before = Pt(5)
+    p_format.space_after  = Pt(5)
+    p_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
+    p_format.line_spacing = Pt(12)
+
+    # 表格字体字号设置
+    run = p.runs[0] if p.runs else p.add_run()
+    run.font.size = Pt(10.5)
+    rPr = run._element.get_or_add_rPr()
+    rFonts = rPr.get_or_add_rFonts()
+    rFonts.set(qn('w:ascii'), 'Times New Roman')
+    rFonts.set(qn('w:hAnsi'), 'Times New Roman')
+    rFonts.set(qn('w:eastAsia'), '宋体')
+
+    # 根据单元格值类型设置对齐方式
+    if isinstance(cell_value, (int, float)) and not isinstance(cell_value, bool):
+        p_format.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    else:
+        p_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+# ---------- Word 表格边框 ----------
+def set_tbl_borders(tbl, thick=12, dash=6):
+    rows = tbl.rows 
     if not rows:
         return
 
-    # ---------- 横向 ----------
-    # ① 首行：只加 top 粗线
-    for cell in rows[0].cells:                  # 取单元格
-        tc_pr = cell._tc.get_or_add_tcPr()      # 打开属性
-        tc_borders = tc_pr.first_child_found_in('w:tcBorders') #找第一个子节点
-        if tc_borders is None:                  #子节点是空的
-            tc_borders = OxmlElement('w:tcBorders')  #增加节点
-            tc_pr.append(tc_borders)            #挂到父节点下面
-        top = OxmlElement('w:top')              #创建一个标签节点
-        top.set(qn('w:val'), 'single')          #设置w:val为single
+    # 横向边框
+    for cell in rows[0].cells:                 
+        tc_pr = cell._tc.get_or_add_tcPr()     
+        tc_borders = tc_pr.first_child_found_in('w:tcBorders') 
+        if tc_borders is None:                  
+            tc_borders = OxmlElement('w:tcBorders')  
+            tc_pr.append(tc_borders)           
+        top = OxmlElement('w:top')              
+        top.set(qn('w:val'), 'single')
         top.set(qn('w:sz'), str(thick))
         top.set(qn('w:color'), '000000')
-        tc_borders.append(top)                  #应用这个设置
+        tc_borders.append(top)
 
-        # 追加 bottom 虚线
         btm = OxmlElement('w:bottom')
         btm.set(qn('w:val'), 'dotted')
         btm.set(qn('w:sz'), str(dash))
         btm.set(qn('w:color'), '000000')
         tc_borders.append(btm)
         
-    # ② 中间行：只加 bottom 虚线
-    for row in rows[1:-1]:   #跳过第一行和最后一行
-        for cell in row.cells:    #取行里的单元格
+    for row in rows[1:-1]:
+        for cell in row.cells:
             tc_pr = cell._tc.get_or_add_tcPr()
             tc_borders = tc_pr.first_child_found_in('w:tcBorders')
             if tc_borders is None:
@@ -66,7 +198,6 @@ def set_table_borders(tbl, thick=12, dash=6):   #封装函数
             btm.set(qn('w:color'), '000000')
             tc_borders.append(btm)
 
-    # ③ 末行：只加 bottom 粗线
     for cell in rows[-1].cells:
         tc_pr = cell._tc.get_or_add_tcPr()
         tc_borders = tc_pr.first_child_found_in('w:tcBorders')
@@ -79,8 +210,7 @@ def set_table_borders(tbl, thick=12, dash=6):   #封装函数
         btm.set(qn('w:color'), '000000')
         tc_borders.append(btm)
 
-    # ---------- 竖向 ----------
-    # ④ 列间虚竖线：除了最右列，其余每列都画 right 虚线
+    # 竖向边框
     for row in rows:
         for idx, cell in enumerate(row.cells):
             tc_pr = cell._tc.get_or_add_tcPr()
@@ -89,214 +219,232 @@ def set_table_borders(tbl, thick=12, dash=6):   #封装函数
                 tc_borders = OxmlElement('w:tcBorders')
                 tc_pr.append(tc_borders)
 
-            # 不是最右列 → 画 right 虚线（列间线）
             if idx != len(row.cells) - 1:
                 right = OxmlElement('w:right')
                 right.set(qn('w:val'), 'dotted')
                 right.set(qn('w:sz'), str(dash))
                 right.set(qn('w:color'), '000000')
                 tc_borders.append(right)
-            # 最左/最左外线：不画 left，保持空
 
-def is_number(s: str) -> bool:
-    """纯数字（可带小数点）返回 True"""
+# ---------- 转换函数 ----------
+def excel_to_word(excel_file, doc_stream):
+    """转换单个Excel文件为Word文档"""
     try:
-        float(s.replace(",", ""))
-        return "." not in s or s.count(".") == 1
-    except ValueError:
-        return False
+        wb = openpyxl.load_workbook(excel_file, data_only=True)
+        ws = wb.worksheets[0]
+        doc = Document()
+
+        tbl_ranges = find_tbls(ws)
+        tbl_idx = 0
+        row_idx = 1
+
+        while row_idx <= ws.max_row:
+            if tbl_idx < len(tbl_ranges) and row_idx == tbl_ranges[tbl_idx][0]:
+                tbl_start, tbl_end = tbl_ranges[tbl_idx]
+
+                tbl_rows = tbl_end - tbl_start + 1
+                tbl_cols = effective_cols(ws, tbl_start, tbl_end)
+                tbl = doc.add_table(rows=tbl_rows, cols=tbl_cols)
+
+                for r_offset in range(tbl_rows):
+                    src_row = list(ws.iter_rows(min_row=tbl_start + r_offset,
+                                                max_row=tbl_start + r_offset,
+                                                values_only=False))[0]
+                    dest_cells = tbl.rows[r_offset].cells
+                    for c_idx in range(tbl_cols):
+                        cell_value = src_row[c_idx].value
+                        cell_text = fmt_value(src_row[c_idx])
+                        set_cell_format(dest_cells[c_idx], cell_text, cell_value)
+
+                for (r, c, h, w) in collect_merges(ws, tbl_start, tbl_end):
+                    if c - 1 + w - 1 < tbl_cols:
+                        top_left = tbl.cell(r - tbl_start, c - 1)
+                        btm_right = tbl.cell(r - tbl_start + h - 1, c - 1 + w - 1)
+                        top_left.merge(btm_right)
+
+                set_tbl_borders(tbl)
+                row_idx = tbl_end + 1
+                tbl_idx += 1
+                continue
+
+            txt = ' '.join(fmt_value(c) for c in ws[row_idx]).strip()
+            if txt:  # 只添加非空段落
+                p = doc.add_paragraph(txt)
+                set_para_format(p)
+            row_idx += 1
+
+        doc.save(doc_stream)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+# ---------- Streamlit 界面 ----------
+def main():
+    st.set_page_config(
+        page_title="Excel转Word工具",
+        page_icon="📊",
+        layout="wide"
+    )
     
-def set_cell_vertical_center(cell):
-    tc_pr = cell._tc.get_or_add_tcPr()
-    tcVAlign = OxmlElement('w:vAlign')
-    tcVAlign.set(qn('w:val'), 'center')
-    tc_pr.append(tcVAlign)
+    st.title("📊 Excel转Word文档转换工具")
+    st.markdown("""
+    将Excel文件转换为Word文档，自动识别表格区域并保留格式。
+    - **支持功能**：识别表格边框、合并单元格、保持数据格式
+    - **支持格式**：.xlsx、.xls
+    - **输出格式**：.docx
+    """)
+    
+    # 文件上传区域
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        uploaded_files = st.file_uploader(
+            "选择Excel文件",
+            type=['xlsx', 'xls'],
+            accept_multiple_files=True,
+            help="可以一次选择多个文件"
+        )
+    
+    with col2:
+        st.markdown("### 📋 转换设置")
+        process_mode = st.radio(
+            "处理模式",
+            ["单文件逐个处理", "多文件批量打包"]
+        )
+    
+    if uploaded_files:
+        st.success(f"已选择 {len(uploaded_files)} 个文件")
+        
+        # 显示文件列表
+        with st.expander("📁 已选择的文件", expanded=True):
+            for i, file in enumerate(uploaded_files, 1):
+                st.write(f"{i}. {file.name} ({file.size:,} bytes)")
+        
+        # 转换按钮
+        if st.button("🚀 开始转换", type="primary", use_container_width=True):
+            if process_mode == "单文件逐个处理":
+                convert_single_files(uploaded_files)
+            else:
+                convert_batch_files(uploaded_files)
 
-    p = cell.paragraphs[0]
-    pfmt = p.paragraph_format
-    pfmt.space_before = Pt(5)
-    pfmt.space_after  = Pt(5)          # 关键：强制 0 磅
-    pfmt.line_spacing_rule = 1         # 固定值
-    pfmt.line_spacing = Pt(12)
-
-def add_formatted_paragraph(doc, text,
-                            before=6,   # 段前，单位磅
-                            after=6,    # 段后，单位磅
-                            line_spacing=Pt(18),   # 固定值18磅，可改
-                            align=WD_ALIGN_PARAGRAPH.LEFT):
-    """
-    在 doc 末尾新增一个段落，并统一设置段前/段后/行距
-    """
-    p = doc.add_paragraph(text)
-    fmt = p.paragraph_format
-    fmt.space_before = Pt(before)
-    fmt.space_after  = Pt(after)
-    fmt.line_spacing_rule = WD_LINE_SPACING.EXACTLY  # 固定值
-    fmt.line_spacing = line_spacing
-    fmt.alignment = align
-    return p
-
-def strip_trailing_nulls(row: List) -> Tuple[int, List]:
-    """
-    去掉行尾连续的 None 或空字符串
-    返回 (有效列数, 去尾后的新列表)
-    """
-    # 统一转 str，方便判断
-    tmp = [str(v) if v is not None else '' for v in row]
-    # 从右往左找第一个非空
-    i = len(tmp)
-    while i > 0 and tmp[i - 1].strip() == '':
-        i -= 1
-    return i, tmp[:i]
-
-def fmt_date(v) -> str:
-    """
-    把 openpyxl 的日期序列数字 -> 指定格式字符串
-    如果不是日期，原样返回
-    """
-    if isinstance(v, datetime):
-        return v.strftime(DATE_FMT)
-    return str(v) if v is not None else ""
-
-# ---------------- 上面全部是你原来的函数，原封不动 ----------------
-
-def excel_to_docx_bytes(ws):
-    """把单个工作表转成 Word 文件，返回 BytesIO"""
-    doc = Document()
-    in_table, tbl = False, None
-    for row in ws.iter_rows(values_only=True):
-        if is_empty_row(row):
-            if in_table:
-                set_table_borders(tbl); in_table=False; tbl=None
-            doc.add_paragraph()
-            continue
-        if is_table_row(row):
-            clean = [str(fmt_date(v)) if v is not None else "" for v in row]
-            _, clean = strip_trailing_nulls(clean)
-            if not in_table:
-                tbl = doc.add_table(rows=0, cols=len(clean))
-                in_table=True
-            cells = tbl.add_row().cells
-            for j, txt in enumerate(clean):
-                cell = cells[j]
-                if is_number(txt):
-                    p = cell.paragraphs[0]
-                    p.text = f"{float(txt):,.2f}"
-                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER if len(tbl.rows)==1 or j==0 else WD_ALIGN_PARAGRAPH.RIGHT
+def convert_single_files(uploaded_files):
+    """单文件逐个处理"""
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for idx, uploaded_file in enumerate(uploaded_files):
+        progress = (idx) / len(uploaded_files)
+        progress_bar.progress(progress)
+        status_text.text(f"正在处理: {uploaded_file.name} ({idx+1}/{len(uploaded_files)})")
+        
+        try:
+            # 创建临时文件进行转换
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as tmp_file:
+                success, error = excel_to_word(uploaded_file, tmp_file.name)
+                
+                if success:
+                    with open(tmp_file.name, 'rb') as f:
+                        doc_bytes = f.read()
+                    
+                    # 提供下载
+                    st.download_button(
+                        label=f"📥 下载 {uploaded_file.name.replace('.xlsx', '.docx').replace('.xls', '.docx')}",
+                        data=doc_bytes,
+                        file_name=uploaded_file.name.replace('.xlsx', '.docx').replace('.xls', '.docx'),
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        key=f"download_{idx}"
+                    )
+                    st.success(f"✓ {uploaded_file.name} 转换完成")
                 else:
-                    p = cell.paragraphs[0]
-                    p.text = txt
-                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER if len(tbl.rows)==1 or j==0 else WD_ALIGN_PARAGRAPH.LEFT
-                set_cell_vertical_center(cell)
-        else:
-            txt = ' '.join(str(v) if v is not None else '' for v in row).strip()
-            if txt: add_formatted_paragraph(doc, txt)
-            if in_table:
-                set_table_borders(tbl); in_table=False; tbl=None
-    if in_table: set_table_borders(tbl)
-    bio = io.BytesIO()
-    doc.save(bio)
-    bio.seek(0)
-    return bio
+                    st.error(f"✗ {uploaded_file.name} 转换失败: {error}")
+                
+                # 清理临时文件
+                os.unlink(tmp_file.name)
+                
+        except Exception as e:
+            st.error(f"处理 {uploaded_file.name} 时出错: {str(e)}")
+    
+    progress_bar.progress(1.0)
+    status_text.text("✅ 所有文件处理完成！")
 
-# -------------------- Streamlit 页面 --------------------
-st.set_page_config(page_title="Excel→Word 在线转换", layout="centered")
-st.title("📄 Excel 转 Word 工具")
-st.markdown("上传一个 `.xlsx` 文件，系统自动按你原来的规则生成 Word 表格并下载。")
+def convert_batch_files(uploaded_files):
+    """多文件批量打包"""
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    with tempfile.TemporaryDirectory() as temp_dir:
+        zip_buffer = io.BytesIO()
+        
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for idx, uploaded_file in enumerate(uploaded_files):
+                progress = idx / len(uploaded_files)
+                progress_bar.progress(progress)
+                status_text.text(f"正在处理: {uploaded_file.name} ({idx+1}/{len(uploaded_files)})")
+                
+                try:
+                    # 创建临时Word文件
+                    doc_filename = uploaded_file.name.replace('.xlsx', '.docx').replace('.xls', '.docx')
+                    doc_path = os.path.join(temp_dir, doc_filename)
+                    
+                    success, error = excel_to_word(uploaded_file, doc_path)
+                    
+                    if success:
+                        # 添加到ZIP
+                        zip_file.write(doc_path, doc_filename)
+                        st.success(f"✓ {uploaded_file.name} 转换完成")
+                    else:
+                        st.error(f"✗ {uploaded_file.name} 转换失败: {error}")
+                        
+                except Exception as e:
+                    st.error(f"处理 {uploaded_file.name} 时出错: {str(e)}")
+        
+        progress_bar.progress(1.0)
+        status_text.text("✅ 所有文件处理完成，正在生成打包文件...")
+        
+        # 提供打包下载
+        zip_buffer.seek(0)
+        current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        st.download_button(
+            label="📦 下载所有转换文件（ZIP格式）",
+            data=zip_buffer,
+            file_name=f"excel_to_word_converted_{current_time}.zip",
+            mime="application/zip",
+            use_container_width=True
+        )
+        
+        st.success(f"已成功转换 {len(uploaded_files)} 个文件")
 
-uploaded = st.file_uploader("选择 Excel 文件", type=["xlsx"])
-if uploaded:
-    wb = openpyxl.load_workbook(uploaded, data_only=True)
-    sheet = wb.worksheets[0]
-    doc_io = excel_to_docx_bytes(sheet)
-    st.success("转换完成！")
-    st.download_button(
-        label="⬇ 下载 Word",
-        data=doc_io,
-        file_name=f"{Path(uploaded.name).stem}.docx",
-        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    )
-import streamlit as st
-from pathlib import Path
-import openpyxl
-from docx import Document
-from docx.oxml import OxmlElement
-from docx.oxml.shared import qn
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
-from docx.shared import Pt
-from typing import List, Tuple
-import re
-from datetime import datetime, timedelta
-import io
-import base64
+# ---------- 侧边栏 ----------
+def sidebar_info():
+    with st.sidebar:
+        st.markdown("## ℹ️ 使用说明")
+        st.markdown("""
+        1. **选择Excel文件**：点击上传按钮或拖拽文件到上传区域
+        2. **选择处理模式**：
+           - 单文件：逐个下载转换后的Word文档
+           - 多文件：所有文件打包为ZIP下载
+        3. **点击转换按钮**开始处理
+        
+        ### 📌 注意事项
+        - 仅处理第一个工作表
+        - 自动识别表格边框
+        - 保留合并单元格
+        - 支持日期、数字格式转换
+        """)
+        
+        st.markdown("---")
+        st.markdown("### 🛠️ 技术支持")
+        st.markdown("""
+        - 边框识别规则：有上边框或至少2个非空单元格
+        - 表格样式：首尾粗边框，中间虚线
+        - 字体：宋体 + Times New Roman
+        """)
+        
+        st.markdown("---")
+        st.markdown("**版本**: 1.0.0")
+        st.markdown("**更新日期**: 2024年1月")
 
-DATE_FMT = '%Y-%m-%d'
-
-# ---------------- 下面全部是你原来的函数，原封不动 ----------------
-def is_empty_row(row):...
-def is_table_row(row):...
-def set_table_borders(tbl, thick=12, dash=6):...
-def is_number(s: str) -> bool:...
-def set_cell_vertical_center(cell):...
-def add_formatted_paragraph(doc, text, before=6, after=6, line_spacing=Pt(18),
-                            align=WD_ALIGN_PARAGRAPH.LEFT):...
-def strip_trailing_nulls(row: List) -> Tuple[int, List]:...
-def fmt_date(v):...
-# ---------------- 上面全部是你原来的函数，原封不动 ----------------
-
-def excel_to_docx_bytes(ws):
-    """把单个工作表转成 Word 文件，返回 BytesIO"""
-    doc = Document()
-    in_table, tbl = False, None
-    for row in ws.iter_rows(values_only=True):
-        if is_empty_row(row):
-            if in_table:
-                set_table_borders(tbl); in_table=False; tbl=None
-            doc.add_paragraph()
-            continue
-        if is_table_row(row):
-            clean = [str(fmt_date(v)) if v is not None else "" for v in row]
-            _, clean = strip_trailing_nulls(clean)
-            if not in_table:
-                tbl = doc.add_table(rows=0, cols=len(clean))
-                in_table=True
-            cells = tbl.add_row().cells
-            for j, txt in enumerate(clean):
-                cell = cells[j]
-                if is_number(txt):
-                    p = cell.paragraphs[0]
-                    p.text = f"{float(txt):,.2f}"
-                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER if len(tbl.rows)==1 or j==0 else WD_ALIGN_PARAGRAPH.RIGHT
-                else:
-                    p = cell.paragraphs[0]
-                    p.text = txt
-                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER if len(tbl.rows)==1 or j==0 else WD_ALIGN_PARAGRAPH.LEFT
-                set_cell_vertical_center(cell)
-        else:
-            txt = ' '.join(str(v) if v is not None else '' for v in row).strip()
-            if txt: add_formatted_paragraph(doc, txt)
-            if in_table:
-                set_table_borders(tbl); in_table=False; tbl=None
-    if in_table: set_table_borders(tbl)
-    bio = io.BytesIO()
-    doc.save(bio)
-    bio.seek(0)
-    return bio
-
-# -------------------- Streamlit 页面 --------------------
-st.set_page_config(page_title="Excel→Word 在线转换", layout="centered")
-st.title("📄 Excel 转 Word 工具")
-st.markdown("上传一个 `.xlsx` 文件，系统自动按你原来的规则生成 Word 表格并下载。")
-
-uploaded = st.file_uploader("选择 Excel 文件", type=["xlsx"])
-if uploaded:
-    wb = openpyxl.load_workbook(uploaded, data_only=True)
-    sheet = wb.worksheets[0]
-    doc_io = excel_to_docx_bytes(sheet)
-    st.success("转换完成！")
-    st.download_button(
-        label="⬇ 下载 Word",
-        data=doc_io,
-        file_name=f"{Path(uploaded.name).stem}.docx",
-        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    )
+if __name__ == "__main__":
+    sidebar_info()
+    main()
