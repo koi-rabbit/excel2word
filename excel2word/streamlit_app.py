@@ -473,12 +473,11 @@ def sidebar_info():
         st.markdown("### ⚠️ 注意事项")
         st.markdown("""
         1. 仅处理第一个工作表
-        2. 保留合并单元格和格式
-        3. 大文件可能需要较长时间
-        4. 批量转换会自动打包下载
+        2. 大文件可能需要较长时间
         """)
 
 if __name__ == "__main__":
     sidebar_info()
     main()
+
 
