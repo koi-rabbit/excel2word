@@ -11,9 +11,7 @@ from typing import List, Tuple
 import warnings
 import datetime
 import io
-import base64
 import zipfile
-from datetime import datetime
 import tempfile
 import os
 
@@ -305,10 +303,14 @@ def main():
         st.session_state.download_data = None
     if 'download_filename' not in st.session_state:
         st.session_state.download_filename = None
+    if 'success_count' not in st.session_state:
+        st.session_state.success_count = 0
+    if 'failed_count' not in st.session_state:
+        st.session_state.failed_count = 0
+    if 'failed_files' not in st.session_state:
+        st.session_state.failed_files = []
     if 'is_batch' not in st.session_state:
         st.session_state.is_batch = False
-    if 'uploaded_files' not in st.session_state:
-        st.session_state.uploaded_files = None
     
     st.title("📊 Excel转Word文档转换工具")
     
@@ -319,54 +321,62 @@ def main():
         accept_multiple_files=True,
     )
     
-    # 如果上传了新文件，重置状态
-    if uploaded_files and st.session_state.uploaded_files != uploaded_files:
-        st.session_state.converted = False
-        st.session_state.download_data = None
-        st.session_state.uploaded_files = uploaded_files
-    
     if uploaded_files:
         file_count = len(uploaded_files)
         
-        # 显示文件信息
-        st.info(f"📁 已选择 **{file_count}** 个文件")
-        
-        # 主按钮区域（单文件模式）
-        if file_count == 1 and st.session_state.converted:
-            # 显示下载按钮
-            if st.download_button(
-                label=f"📥 下载 {st.session_state.download_filename}",
-                data=st.session_state.download_data,
-                file_name=st.session_state.download_filename,
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                type="primary",
-                use_container_width=True
-            ):
-                st.success("✅ 文件已准备下载！")
-            
-            # 重置按钮
-            if st.button("🔄 重新转换", use_container_width=True):
+        # 如果上传了新文件或重置了状态，清除转换结果
+        if st.session_state.converted:
+            if not all(f.name in [uf.name for uf in uploaded_files] for f in st.session_state.uploaded_files if hasattr(st.session_state, 'uploaded_files')):
                 st.session_state.converted = False
-                st.rerun()
         
-        elif not st.session_state.converted:
+        # 显示文件信息（包含转换结果）
+        if st.session_state.converted:
+            status_text = f"📁 已选择 **{file_count}** 个文件 | ✅ 转换成功：**{st.session_state.success_count}** | ❌ 转换失败：**{st.session_state.failed_count}**"
+        else:
+            status_text = f"📁 已选择 **{file_count}** 个文件"
+        
+        st.info(status_text)
+        
+        # 主按钮区域
+        if not st.session_state.converted:
             # 显示转换按钮
             if st.button("🚀 开始转换", type="primary", use_container_width=True):
+                # 重置之前的结果
+                st.session_state.success_count = 0
+                st.session_state.failed_count = 0
+                st.session_state.failed_files = []
+                
                 if file_count == 1:
                     # 单文件处理
                     st.session_state.is_batch = False
                     with st.spinner("正在转换中..."):
-                        process_single_file_optimized(uploaded_files[0])
-                        st.rerun()
+                        process_single_file_simple(uploaded_files[0])
                 else:
                     # 多文件处理
                     st.session_state.is_batch = True
                     with st.spinner("正在批量转换中..."):
-                        process_multiple_files_optimized(uploaded_files)
-                        st.rerun()
+                        process_multiple_files_simple(uploaded_files)
+        
+        else:
+            # 显示下载按钮（绿色）
+            if st.download_button(
+                label=f"📥 下载转换结果 ({st.session_state.download_filename})",
+                data=st.session_state.download_data,
+                file_name=st.session_state.download_filename,
+                mime="application/zip" if st.session_state.is_batch else "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                type="primary",  # 这是绿色按钮
+                use_container_width=True
+            ):
+                st.success("✅ 开始下载...")
+            
+            # 显示失败文件列表（在下载按钮下面）
+            if st.session_state.failed_files:
+                with st.expander(f"📛 转换失败的文件 ({st.session_state.failed_count}个)", expanded=False):
+                    for file_name, error in st.session_state.failed_files:
+                        st.error(f"**{file_name}**: {error}")
 
-def process_single_file_optimized(uploaded_file):
-    """优化版单文件处理"""
+def process_single_file_simple(uploaded_file):
+    """简化版单文件处理"""
     try:
         # 创建临时文件进行转换
         with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as tmp_file:
@@ -379,20 +389,23 @@ def process_single_file_optimized(uploaded_file):
                 # 保存到会话状态
                 st.session_state.download_data = doc_bytes
                 st.session_state.download_filename = uploaded_file.name.replace('.xlsx', '.docx').replace('.xls', '.docx')
+                st.session_state.success_count = 1
                 st.session_state.converted = True
             else:
-                st.error(f"❌ 转换失败: {error}")
-                st.session_state.converted = False
+                st.session_state.failed_count = 1
+                st.session_state.failed_files = [(uploaded_file.name, error)]
+                st.session_state.converted = True
             
             # 清理临时文件
             os.unlink(tmp_file.name)
             
     except Exception as e:
-        st.error(f"❌ 处理文件时出错: {str(e)}")
-        st.session_state.converted = False
+        st.session_state.failed_count = 1
+        st.session_state.failed_files = [(uploaded_file.name, str(e))]
+        st.session_state.converted = True
 
-def process_multiple_files_optimized(uploaded_files):
-    """优化版多文件处理"""
+def process_multiple_files_simple(uploaded_files):
+    """简化版多文件处理"""
     # 创建临时文件夹
     with tempfile.TemporaryDirectory() as temp_dir:
         output_folder = os.path.join(temp_dir, "转换结果")
@@ -401,11 +414,12 @@ def process_multiple_files_optimized(uploaded_files):
         success_count = 0
         failed_files = []
         
-        progress_bar = st.progress(0)
+        # 使用容器显示进度
+        progress_container = st.empty()
         
         for idx, uploaded_file in enumerate(uploaded_files):
             progress = (idx + 1) / len(uploaded_files)
-            progress_bar.progress(progress)
+            progress_container.progress(progress)
             
             try:
                 # 生成输出文件名
@@ -423,26 +437,29 @@ def process_multiple_files_optimized(uploaded_files):
             except Exception as e:
                 failed_files.append((uploaded_file.name, str(e)))
         
-        # 显示结果
+        # 清理进度条
+        progress_container.empty()
+        
+        # 保存结果到会话状态
         if success_count > 0:
             # 创建ZIP文件
             zip_buffer = create_zip_bytes(output_folder)
             
             # 保存到会话状态
             st.session_state.download_data = zip_buffer.getvalue()
-            st.session_state.download_filename = f"Excel转Word_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+            st.session_state.download_filename = f"Excel转Word_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+            st.session_state.success_count = success_count
+            st.session_state.failed_count = len(failed_files)
+            st.session_state.failed_files = failed_files
             st.session_state.converted = True
-            
-            # 显示成功信息
-            st.success(f"✅ 批量转换完成！成功：{success_count}个文件")
         else:
-            st.warning("⚠️ 没有文件转换成功，请检查上传的文件格式是否正确。")
-        
-        # 显示失败文件详情
-        if failed_files:
-            with st.expander("📛 转换失败的文件详情", expanded=False):
-                for file_name, error in failed_files:
-                    st.error(f"**{file_name}**: {error}")
+            # 即使全部失败也要保存状态
+            st.session_state.success_count = 0
+            st.session_state.failed_count = len(failed_files)
+            st.session_state.failed_files = failed_files
+            st.session_state.download_filename = f"Excel转Word_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+            st.session_state.download_data = b""  # 空的ZIP文件
+            st.session_state.converted = True
 
 # ---------- 侧边栏 ----------
 def sidebar_info():
@@ -479,5 +496,6 @@ def sidebar_info():
 if __name__ == "__main__":
     sidebar_info()
     main()
+
 
 
