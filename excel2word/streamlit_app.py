@@ -321,16 +321,43 @@ def main():
         
         # 显示文件信息
         st.info(f"📁 已选择 **{file_count}** 个文件")
-       
-        # 转换按钮
-        if st.button("🚀 开始转换", type="primary", use_container_width=True):
-            with st.spinner("正在处理中，请稍候..."):
-                if file_count == 1:
-                    # 单文件处理
-                    process_single_file(uploaded_files[0])
-                else:
-                    # 多文件处理
-                    process_multiple_files(uploaded_files)
+        
+        # 重置状态（如果上传了新文件）
+        if st.session_state.conversion_done:
+            st.session_state.conversion_done = False
+            st.session_state.download_data = None
+        
+        # 如果是单个文件且已转换完成，显示下载按钮
+        if st.session_state.conversion_done and not st.session_state.is_batch:
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                if st.download_button(
+                    label=f"📥 下载 {st.session_state.download_filename}",
+                    data=st.session_state.download_data,
+                    file_name=st.session_state.download_filename,
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    use_container_width=True
+                ):
+                    st.success("✅ 文件已准备下载！")
+            with col2:
+                if st.button("🔄 重新转换", use_container_width=True):
+                    st.session_state.conversion_done = False
+                    st.rerun()
+        else:
+            # 显示转换按钮
+            if st.button("🚀 开始转换", type="primary", use_container_width=True):
+                with st.spinner("正在处理中，请稍候..."):
+                    if file_count == 1:
+                        # 单文件处理
+                        st.session_state.is_batch = False
+                        process_single_file(uploaded_files[0])
+                    else:
+                        # 多文件处理
+                        st.session_state.is_batch = True
+                        process_multiple_files(uploaded_files)
+                
+                # 强制重新运行以更新界面
+                st.rerun()
 
 def process_single_file(uploaded_file):
     """处理单个文件"""
@@ -466,4 +493,5 @@ def sidebar_info():
 if __name__ == "__main__":
     sidebar_info()
     main()
+
 
